@@ -323,12 +323,12 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunOutput> {
     const ticker = tickerData[0];
     change24h = ticker ? parseFloat(ticker.change24h) : 0;
     candles = candleRaw.map((c) => ({
-      ts: parseInt(c.ts, 10),
-      open: parseFloat(c.o),
-      high: parseFloat(c.h),
-      low: parseFloat(c.l),
-      close: parseFloat(c.c),
-      volume: parseFloat(c.vol),
+      ts: c.ts,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
     }));
     snapshot = buildTechnicalSnapshot(candles, change24h);
     perceptionStep.content = `已采集 ${symbol} 现货 ${candles.length} 根 1H K线，现价 ${snapshot.price.toFixed(2)}，24h 涨跌 ${change24h.toFixed(2)}%，波动率 ${(snapshot.volatility * 100).toFixed(1)}%。`;

@@ -60,30 +60,52 @@ export interface PublicTickerRaw {
   ts: string;
   bidPr: string;
   askPr: string;
-  changeUtc: string;
+  changeUtc24h: string;
+  openUtc: string;
+  baseVolume: string;
+  quoteVolume: string;
+  usdtVolume: string;
 }
 
 /**
  * Get spot tickers for given symbols (public, no auth).
  * Endpoint: GET /api/v2/spot/market/tickers
+ *
+ * IMPORTANT: Bitget V2 spot tickers endpoint does NOT support
+ * comma-separated symbols (returns error 40034). We must fetch
+ * each symbol individually. To avoid timeouts, we fire all
+ * requests in parallel.
  */
 export async function getSpotTickers(symbols: string[]): Promise<PublicTickerRaw[]> {
-  const symbolsParam = symbols.join(",");
-  const path = `/api/v2/spot/market/tickers?symbol=${encodeURIComponent(symbolsParam)}`;
-  const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { "Content-Type": "application/json" },
-    next: { revalidate: 0 },
-  });
-  if (!res.ok) {
-    throw new Error(`Bitget tickers HTTP ${res.status}: ${await res.text()}`);
+  const results = await Promise.allSettled(
+    symbols.map(async (sym) => {
+      const path = `/api/v2/spot/market/tickers?symbol=${encodeURIComponent(sym)}`;
+      const url = `${BASE_URL}${path}`;
+      const res = await fetch(url, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        next: { revalidate: 0 },
+      });
+      if (!res.ok) {
+        throw new Error(`Bitget tickers HTTP ${res.status} for ${sym}`);
+      }
+      const json = await res.json();
+      if (json.code !== "00000") {
+        throw new Error(`Bitget tickers error for ${sym}: ${json.msg || JSON.stringify(json)}`);
+      }
+      // data is an array with one element when symbol is specified
+      const data = json.data as PublicTickerRaw[];
+      return data[0] || null;
+    })
+  );
+  // Collect successful results, skip failures
+  const tickers: PublicTickerRaw[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value !== null) {
+      tickers.push(r.value);
+    }
   }
-  const json = await res.json();
-  if (json.code !== "00000") {
-    throw new Error(`Bitget tickers error: ${json.msg || JSON.stringify(json)}`);
-  }
-  return json.data as PublicTickerRaw[];
+  return tickers;
 }
 
 /**
@@ -113,25 +135,47 @@ export async function getFuturesTickers(
 }
 
 export interface CandleRaw {
-  ts: string; // ms
-  o: string; // open
-  h: string; // high
-  l: string; // low
-  c: string; // close
-  vol: string; // base volume
-  volQuote: string;
+  ts: number; // ms timestamp
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number; // base volume
+  quoteVolume: number;
+}
+
+/**
+ * Map our UI granularity values to Bitget V2 API accepted format.
+ * Bitget V2 spot candles accepts: 1min, 5min, 15min, 30min, 1h, 4h, 6h, 12h, 1day, 1week, 1M
+ * Our UI uses: 1m, 5m, 15m, 30m, 1H, 4H, 1D, 1W
+ */
+function toBitgetGranularity(g: string): string {
+  const map: Record<string, string> = {
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1H": "1h",
+    "4H": "4h",
+    "1D": "1day",
+    "1W": "1week",
+  };
+  return map[g] || g;
 }
 
 /**
  * Get spot candles (public).
  * Endpoint: GET /api/v2/spot/market/candles
+ *
+ * Response format: array of arrays [ts, open, high, low, close, baseVol, quoteVol, usdtVol]
  */
 export async function getSpotCandles(
   symbol: string,
   granularity: string,
   limit = 200
 ): Promise<CandleRaw[]> {
-  const path = `/api/v2/spot/market/candles?symbol=${encodeURIComponent(symbol)}&granularity=${granularity}&limit=${limit}`;
+  const bgGranularity = toBitgetGranularity(granularity);
+  const path = `/api/v2/spot/market/candles?symbol=${encodeURIComponent(symbol)}&granularity=${bgGranularity}&limit=${limit}`;
   const url = `${BASE_URL}${path}`;
   const res = await fetch(url, {
     method: "GET",
@@ -145,8 +189,19 @@ export async function getSpotCandles(
   if (json.code !== "00000") {
     throw new Error(`Bitget candles error: ${json.msg || JSON.stringify(json)}`);
   }
-  // Bitget returns newest-first; reverse to oldest-first for charting
-  return (json.data as CandleRaw[]).slice().reverse();
+  // Bitget returns array of arrays: [ts, open, high, low, close, baseVol, quoteVol, usdtVol]
+  // and newest-first; we reverse to oldest-first for charting
+  const rawData = json.data as unknown[][];
+  const candles: CandleRaw[] = rawData.map((row) => ({
+    ts: Number(row[0]),
+    open: Number(row[1]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+    volume: Number(row[5]),
+    quoteVolume: Number(row[6] ?? row[5]),
+  }));
+  return candles.reverse();
 }
 
 /**
@@ -159,7 +214,8 @@ export async function getFuturesCandles(
   productType = "USDT-FUTURES",
   limit = 200
 ): Promise<CandleRaw[]> {
-  const path = `/api/v2/mix/market/candles?symbol=${encodeURIComponent(symbol)}&productType=${productType}&granularity=${granularity}&limit=${limit}`;
+  const bgGranularity = toBitgetGranularity(granularity);
+  const path = `/api/v2/mix/market/candles?symbol=${encodeURIComponent(symbol)}&productType=${productType}&granularity=${bgGranularity}&limit=${limit}`;
   const url = `${BASE_URL}${path}`;
   const res = await fetch(url, {
     method: "GET",
@@ -173,7 +229,17 @@ export async function getFuturesCandles(
   if (json.code !== "00000") {
     throw new Error(`Bitget futures candles error: ${json.msg || JSON.stringify(json)}`);
   }
-  return (json.data as CandleRaw[]).slice().reverse();
+  const rawData = json.data as unknown[][];
+  const candles: CandleRaw[] = rawData.map((row) => ({
+    ts: Number(row[0]),
+    open: Number(row[1]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+    volume: Number(row[5]),
+    quoteVolume: Number(row[6] ?? row[5]),
+  }));
+  return candles.reverse();
 }
 
 // ============ Private Endpoints ============
